@@ -1,0 +1,75 @@
+{
+  "sourceDurationSeconds": 74,
+  "scenes": [
+    {
+      "name": "Drone Entrance View",
+      "description": "A wide aerial establishing view of the house, grounds, surrounding mountains, driveway, and pool.",
+      "startSeconds": 0,
+      "endSeconds": 4.95,
+      "placement": "left"
+    },
+    {
+      "name": "Swimming Pool",
+      "description": "The swimming pool and adjoining terrace appear among the landscaped grounds.",
+      "startSeconds": 4.95,
+      "endSeconds": 7.45,
+      "placement": "right"
+    },
+    {
+      "name": "Main Living Room",
+      "description": "A furnished living area with large windows and a view toward the outdoor terrace.",
+      "startSeconds": 7.45,
+      "endSeconds": 11.35,
+      "placement": "left"
+    },
+    {
+      "name": "Open-Plan Living & Dining",
+      "description": "Connected lounge and dining spaces shown as part of the open interior layout.",
+      "startSeconds": 11.35,
+      "endSeconds": 18.9,
+      "placement": "right"
+    },
+    {
+      "name": "Bedroom",
+      "description": "Bedroom interiors with beds, wooden furniture, and natural light from windows or doors.",
+      "startSeconds": 18.9,
+      "endSeconds": 29.6,
+      "placement": "left"
+    },
+    {
+      "name": "Mountain & Open-Sky Views",
+      "description": "The surrounding hills, open sky, and greenery beyond the property.",
+      "startSeconds": 29.6,
+      "endSeconds": 31.2,
+      "placement": "right"
+    },
+    {
+      "name": "Outdoor Terrace & Patio",
+      "description": "Paved terrace and patio paths beside the house and landscaped garden.",
+      "startSeconds": 31.2,
+      "endSeconds": 38.9,
+      "placement": "left"
+    },
+    {
+      "name": "Kitchen & Dining Hall",
+      "description": "The kitchen, dining table, cabinetry, and connected interior spaces.",
+      "startSeconds": 38.9,
+      "endSeconds": 50.3,
+      "placement": "right"
+    },
+    {
+      "name": "Full Property Drone Overview",
+      "description": "A broad aerial view brings the house, pool, gardens, and driveway into one frame.",
+      "startSeconds": 50.3,
+      "endSeconds": 64.3,
+      "placement": "left"
+    },
+    {
+      "name": "Final Exterior Overview",
+      "description": "The closing aerial view widens to the property and surroundings before fading out.",
+      "startSeconds": 64.3,
+      "endSeconds": 74,
+      "placement": "right"
+    }
+  ]
+}

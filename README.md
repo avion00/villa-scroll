@@ -24,7 +24,7 @@ Use `npm run lint` and `npm run build` to check the project and create a product
 - `/contact`, `/book-a-viewing`, `/property-valuation` — validated enquiry forms
 - `/mortgage-calculator`, `/favorites`, `/compare`, `/guides`
 
-The homepage opens directly on a single pinned HTML canvas section. GSAP ScrollTrigger progress selects the displayed frame in `app/components/frame-sequence-canvas.tsx`; no video or autonomous playback loop is used. The first 150 frames preload before the clean progress indicator clears, and the remaining frames load in the background. Lenis smooth scrolling is connected to the GSAP ticker by `app/components/smooth-scroll-provider.tsx`. The same minimal Properties, Areas and Contact navigation is shared across the homepage and sub-pages.
+The homepage opens directly on a single pinned HTML canvas section. GSAP ScrollTrigger maps the full scroll range to the first and last entries in `app/generated/frame-manifest.json`; no video or autonomous playback loop is used. A priority queue loads frames around the current position and keeps a bounded cache of decoded images. Lenis smooth scrolling is connected to the GSAP ticker by `app/components/smooth-scroll-provider.tsx`. The same minimal Properties, Areas and Contact navigation is shared across the homepage and sub-pages.
 
 ## Configuration before production
 
@@ -40,6 +40,13 @@ The six records in `app/lib/properties.ts` are demonstration data transcribed fr
 
 The supplied CloudFront image URLs are third-party reference assets. Their URLs were reachable when checked, but usage rights, continued availability and permission to publish must be confirmed. A local frame is shown if a remote cover image cannot load.
 
-The 720 extracted frames are under `public/frames/`. The original `public/house.mp4` is retained as an unused asset.
+### Scroll-tour frames
+
+The extracted frames are in `public/frames/` (or `public/frames-optimized/` when that directory is present). `npm run dev` and `npm run build` regenerate `app/generated/frame-manifest.json` and verify that the numbered JPG sequence is complete. Each manifest entry records its zero-based index, one-based frame number, filename and timestamp across the 74-second source.
+
+Edit `app/lib/villa-sequence-config.json` to adjust the source duration, scene descriptions or scene start and end timestamps. Scene boundaries are based on the supplied footage and can be refined there without changing the canvas animation.
+
+The original `public/house.mp4` is retained as an unused asset.
 
 No real company address, phone number, email, agent identity, testimonial, market statistic, rental estimate or development financial data is configured. Mortgage and additional-cost results are estimates based only on user-entered assumptions.
+# villa-scroll

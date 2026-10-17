@@ -3,87 +3,74 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import frameManifest from "../generated/frame-manifest.json";
+import sequenceConfig from "../lib/villa-sequence-config.json";
 import { useLenis } from "./smooth-scroll-provider";
 
 gsap.registerPlugin(ScrollTrigger);
 
-type Room = {
-  name: string;
-  title: string;
-  description: string;
-  start: number;
-  end: number;
-  placement: "left" | "right";
-};
+const PRELOAD_RADIUS = 12;
+const LOAD_CONCURRENCY = 3;
+const MAX_CACHED_DESKTOP_FRAMES = 30;
+const MAX_CACHED_MOBILE_FRAMES = 18;
 
-const rooms: Room[] = [
-  { name: "Entrance", title: "A quieter arrival.", description: "A first look at the architecture, setting the tone for the home.", start: 0, end: 0.16, placement: "left" },
-  { name: "Living Room", title: "Space to settle in.", description: "Open living spaces bring light, texture and everyday life together.", start: 0.16, end: 0.33, placement: "right" },
-  { name: "Kitchen", title: "Made for the daily ritual.", description: "Considered lines and natural materials shape the heart of the home.", start: 0.33, end: 0.5, placement: "left" },
-  { name: "Bedroom", title: "Room to find your rhythm.", description: "A softer retreat, composed around calm and quiet.", start: 0.5, end: 0.67, placement: "right" },
-  { name: "Bathroom", title: "A moment to pause.", description: "A measured palette and gentle light bring a sense of ease.", start: 0.67, end: 0.84, placement: "left" },
-  { name: "Garden", title: "The day opens outward.", description: "A final glimpse of the home meeting its landscape.", start: 0.84, end: 1, placement: "right" },
-];
+const scenes = sequenceConfig.scenes;
+const totalFrames = frameManifest.frames.length;
+const sourceDurationSeconds = frameManifest.sourceDurationSeconds;
 
-const INITIAL_CONCURRENCY = 12;
-const BACKGROUND_CONCURRENCY = 4;
-
-function framePath(index: number) {
-  return `/frames/frame_${String(index + 1).padStart(4, "0")}.jpg`;
+function clampProgress(progress: number) {
+  return Math.max(0, Math.min(1, progress));
 }
 
-function frameForProgress(progress: number, totalFrames: number) {
-  return Math.min(totalFrames - 1, Math.floor(progress * (totalFrames - 1)));
+function frameForProgress(progress: number) {
+  return Math.round(clampProgress(progress) * (totalFrames - 1));
 }
 
-export default function FrameSequenceCanvas({
-  frameCount = 720,
-  initialFrameCount = 150,
-}: {
-  frameCount?: number;
-  initialFrameCount?: number;
-}) {
-  const totalFrames = Math.max(1, Math.floor(frameCount));
-  const initialFrames = Math.min(totalFrames, Math.max(1, Math.floor(initialFrameCount)));
+function sceneForProgress(progress: number) {
+  const timestamp = clampProgress(progress) * sourceDurationSeconds;
+  const index = scenes.findIndex(
+    (scene, sceneIndex) =>
+      timestamp >= scene.startSeconds &&
+      (timestamp < scene.endSeconds || sceneIndex === scenes.length - 1),
+  );
+  return index === -1 ? scenes.length - 1 : index;
+}
+
+export default function FrameSequenceCanvas() {
   const lenis = useLenis();
   const sectionRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const roomCardRefs = useRef<Array<HTMLDivElement | null>>([]);
   const roomInnerRefs = useRef<Array<HTMLDivElement | null>>([]);
-  const roomTimelineRefs = useRef<Array<gsap.core.Timeline | null>>([]);
   const progressButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const framesRef = useRef<Array<HTMLImageElement | null>>([]);
-  const pendingFramesRef = useRef(new Map<number, Promise<void>>());
-  const requestFrameRef = useRef<(index: number) => void>(() => {});
+  const cacheRef = useRef(new Map<number, HTMLImageElement>());
+  const failedFramesRef = useRef(new Set<number>());
+  const requestFramesRef = useRef<(frame: number, direction: number) => void>(() => {});
   const currentFrameRef = useRef(0);
-  const activeRoomRef = useRef(0);
+  const activeSceneRef = useRef(0);
   const renderedFrameRef = useRef(-1);
-  const backgroundProgressRef = useRef(0);
   const latestProgressRef = useRef(0);
   const renderRequestRef = useRef(0);
   const triggerRef = useRef<ScrollTrigger | null>(null);
-  const [loadedInitial, setLoadedInitial] = useState(0);
-  const [settledInitial, setSettledInitial] = useState(0);
-  const [initialFailures, setInitialFailures] = useState<number[]>([]);
-  const [backgroundProgress, setBackgroundProgress] = useState(0);
-  const [backgroundFailures, setBackgroundFailures] = useState<number[]>([]);
   const [isReady, setIsReady] = useState(false);
   const [retry, setRetry] = useState(0);
-  const [activeRoom, setActiveRoom] = useState(0);
+  const [activeScene, setActiveScene] = useState(0);
   const [sequenceActive, setSequenceActive] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const [unavailableFrameCount, setUnavailableFrameCount] = useState(0);
 
-  const drawFrame = useCallback((index: number) => {
+  const drawFrame = useCallback((index: number, loadedImage?: HTMLImageElement) => {
     if (renderedFrameRef.current === index) return;
+
     const canvas = canvasRef.current;
-    const image = framesRef.current[index];
-    if (!canvas || !image || image.naturalWidth === 0) return;
+    if (!canvas) return;
+
+    const image = loadedImage ?? cacheRef.current.get(index);
+    if (!image || image.naturalWidth === 0) return;
 
     const context = canvas.getContext("2d");
-    if (!context) return;
-
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
-    if (!width || !height) return;
+    if (!context || !width || !height) return;
 
     const scale = Math.max(width / image.naturalWidth, height / image.naturalHeight);
     const imageWidth = image.naturalWidth * scale;
@@ -93,52 +80,258 @@ export default function FrameSequenceCanvas({
     context.drawImage(image, (width - imageWidth) / 2, (height - imageHeight) / 2, imageWidth, imageHeight);
     renderedFrameRef.current = index;
     canvas.dataset.frameIndex = String(index);
+    canvas.dataset.frameNumber = String(frameManifest.frames[index]?.frameNumber ?? index + 1);
   }, []);
 
-  const scheduleScrollRender = useCallback((progress: number) => {
-    latestProgressRef.current = progress;
-    if (renderRequestRef.current) return;
+  const scheduleScrollRender = useCallback(
+    (progress: number) => {
+      latestProgressRef.current = clampProgress(progress);
+      if (renderRequestRef.current) return;
 
-    renderRequestRef.current = requestAnimationFrame(() => {
-      renderRequestRef.current = 0;
-      const frame = frameForProgress(latestProgressRef.current, totalFrames);
-      if (frame !== currentFrameRef.current) {
-        currentFrameRef.current = frame;
-        drawFrame(frame);
-      } else if (renderedFrameRef.current === -1) {
-        drawFrame(frame);
+      renderRequestRef.current = requestAnimationFrame(() => {
+        renderRequestRef.current = 0;
+        const frame = frameForProgress(latestProgressRef.current);
+        const previousFrame = currentFrameRef.current;
+
+        if (frame !== previousFrame || renderedFrameRef.current === -1) {
+          const cachedImage = cacheRef.current.get(frame);
+          if (cachedImage) {
+            cacheRef.current.delete(frame);
+            cacheRef.current.set(frame, cachedImage);
+            drawFrame(frame, cachedImage);
+          } else {
+            let nearestFrame = -1;
+            let nearestDistance = Number.POSITIVE_INFINITY;
+            for (const cachedIndex of cacheRef.current.keys()) {
+              const distance = Math.abs(cachedIndex - frame);
+              if (distance < nearestDistance) {
+                nearestFrame = cachedIndex;
+                nearestDistance = distance;
+              }
+            }
+            if (nearestFrame !== -1) {
+              const nearestImage = cacheRef.current.get(nearestFrame);
+              if (nearestImage) drawFrame(nearestFrame, nearestImage);
+            }
+          }
+
+          currentFrameRef.current = frame;
+          requestFramesRef.current(frame, Math.sign(frame - previousFrame));
+        }
+
+        const sceneIndex = sceneForProgress(latestProgressRef.current);
+        if (sceneIndex !== activeSceneRef.current) {
+          activeSceneRef.current = sceneIndex;
+          setActiveScene(sceneIndex);
+        }
+
+        progressButtonRefs.current.forEach((button, index) => {
+          if (!button) return;
+          const isCurrent = index === sceneIndex;
+          button.classList.toggle("is-current", isCurrent);
+          button.setAttribute("aria-current", isCurrent ? "step" : "false");
+        });
+      });
+    },
+    [drawFrame],
+  );
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const updatePreference = () => setReducedMotion(media.matches);
+    updatePreference();
+    media.addEventListener("change", updatePreference);
+    return () => media.removeEventListener("change", updatePreference);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let activeLoads = 0;
+    const cache = cacheRef.current;
+    const failedFrames = failedFramesRef.current;
+    const pending = new Map<number, HTMLImageElement>();
+    const urgentLoads = new Set<number>();
+    const queue = new Map<
+      number,
+      { priority: number; fetchPriority: "high" | "low" | "auto" }
+    >();
+    let urgentFrame: number | null = null;
+    let urgentLoadActive = false;
+
+    cache.clear();
+    failedFrames.clear();
+
+    const trimCache = (target: number) => {
+      const cacheLimit =
+        window.innerWidth <= 700 ? MAX_CACHED_MOBILE_FRAMES : MAX_CACHED_DESKTOP_FRAMES;
+      while (cache.size > cacheLimit) {
+        let furthestFrame = -1;
+        let furthestDistance = -1;
+        for (const index of cache.keys()) {
+          const distance = Math.abs(index - target);
+          if (distance > furthestDistance) {
+            furthestFrame = index;
+            furthestDistance = distance;
+          }
+        }
+        if (furthestFrame === -1) return;
+        cache.delete(furthestFrame);
       }
-      if (!framesRef.current[frame]) requestFrameRef.current(frame);
+    };
 
-      const roomIndex = rooms.findIndex(
-        (room, index) =>
-          latestProgressRef.current >= room.start &&
-          (latestProgressRef.current < room.end || index === rooms.length - 1),
-      );
-      const safeRoomIndex = roomIndex === -1 ? rooms.length - 1 : roomIndex;
-      if (safeRoomIndex !== activeRoomRef.current) {
-        activeRoomRef.current = safeRoomIndex;
-        setActiveRoom(safeRoomIndex);
+    const startLoad = (
+      index: number,
+      fetchPriority: "high" | "low" | "auto",
+      urgent: boolean,
+    ) => {
+      if (index < 0 || index >= totalFrames || cache.has(index) || pending.has(index)) {
+        if (urgent) {
+          urgentLoadActive = false;
+          pumpUrgentLoad();
+        }
+        return;
       }
+      const frame = frameManifest.frames[index];
+      if (!frame) return;
 
-      roomTimelineRefs.current.forEach((timeline, index) => {
-        if (!timeline) return;
-        const room = rooms[index];
-        const localProgress = Math.max(
-          0,
-          Math.min(1, (latestProgressRef.current - room.start) / (room.end - room.start)),
+      const image = new window.Image();
+      image.decoding = "async";
+      image.fetchPriority = fetchPriority;
+      pending.set(index, image);
+      if (urgent) urgentLoadActive = true;
+      image.onload = () => {
+        void image.decode().then(
+          () => finishLoad(index, image, true, urgent),
+          () => finishLoad(index, image, false, urgent),
         );
-        timeline.progress(localProgress, false);
-      });
+      };
+      image.onerror = () => finishLoad(index, image, false, urgent);
+      image.src = `/${frameManifest.frameDirectory}/${frame.filename}`;
+    };
 
-      progressButtonRefs.current.forEach((button, index) => {
-        if (!button) return;
-        const isCurrent = index === safeRoomIndex;
-        button.classList.toggle("is-current", isCurrent);
-        button.setAttribute("aria-current", isCurrent ? "step" : "false");
-      });
-    });
-  }, [drawFrame, totalFrames]);
+    const finishLoad = (
+      index: number,
+      image: HTMLImageElement,
+      succeeded: boolean,
+      urgent: boolean,
+    ) => {
+      if (pending.get(index) !== image) return;
+      pending.delete(index);
+      const wasPromoted = urgentLoads.delete(index);
+      if (urgent) {
+        urgentLoadActive = false;
+      } else {
+        activeLoads -= 1;
+        if (wasPromoted) urgentLoadActive = false;
+      }
+
+      if (!cancelled && succeeded) {
+        cache.delete(index);
+        cache.set(index, image);
+        trimCache(currentFrameRef.current);
+        if (index === currentFrameRef.current) {
+          drawFrame(index, image);
+          setIsReady(true);
+        }
+      } else if (!cancelled && !failedFrames.has(index)) {
+        failedFrames.add(index);
+        setUnavailableFrameCount(failedFrames.size);
+      }
+
+      pumpUrgentLoad();
+      pumpQueue();
+    };
+
+    const pumpUrgentLoad = () => {
+      if (cancelled || urgentLoadActive || urgentFrame === null) return;
+      const index = urgentFrame;
+      urgentFrame = null;
+      if (cache.has(index)) return;
+      const existingLoad = pending.get(index);
+      if (existingLoad) {
+        existingLoad.fetchPriority = "high";
+        urgentLoads.add(index);
+        urgentLoadActive = true;
+        return;
+      }
+      startLoad(index, "high", true);
+    };
+
+    const pumpQueue = () => {
+      if (cancelled) return;
+      while (activeLoads < LOAD_CONCURRENCY && queue.size > 0) {
+        let index = -1;
+        let priority = Number.POSITIVE_INFINITY;
+        for (const [candidate, job] of queue) {
+          if (job.priority < priority) {
+            index = candidate;
+            priority = job.priority;
+          }
+        }
+        if (index === -1) return;
+        const job = queue.get(index);
+        queue.delete(index);
+        if (!job || index === urgentFrame) continue;
+        if (index < 0 || index >= totalFrames || cache.has(index) || pending.has(index)) continue;
+        activeLoads += 1;
+        startLoad(index, job.fetchPriority, false);
+      }
+    };
+
+    const requestNeighborhood = (target: number, direction: number) => {
+      if (target < 0 || target >= totalFrames || !frameManifest.frames[target]) return;
+
+      urgentFrame = cache.has(target) ? null : target;
+      const desired = new Map<
+        number,
+        { priority: number; fetchPriority: "high" | "low" | "auto" }
+      >();
+      for (
+        let offset = -PRELOAD_RADIUS;
+        offset <= PRELOAD_RADIUS;
+        offset += 1
+      ) {
+        const index = target + offset;
+        if (
+          offset === 0 ||
+          index < 0 ||
+          index >= totalFrames ||
+          cache.has(index) ||
+          pending.has(index) ||
+          failedFrames.has(index)
+        ) {
+          continue;
+        }
+
+        const isAhead = direction === 0 || Math.sign(offset) === direction;
+        const distance = Math.abs(offset);
+        desired.set(index, {
+          priority: distance + (isAhead ? 0 : PRELOAD_RADIUS),
+          fetchPriority: "auto",
+        });
+      }
+
+      queue.clear();
+      for (const [index, job] of desired) queue.set(index, job);
+      pumpUrgentLoad();
+      pumpQueue();
+    };
+
+    requestFramesRef.current = requestNeighborhood;
+    requestNeighborhood(currentFrameRef.current, 1);
+
+    return () => {
+      cancelled = true;
+      queue.clear();
+      for (const image of pending.values()) {
+        image.onload = null;
+        image.onerror = null;
+      }
+      pending.clear();
+      cache.clear();
+      requestFramesRef.current = () => {};
+    };
+  }, [drawFrame, retry]);
 
   useEffect(() => {
     const section = sectionRef.current;
@@ -147,20 +340,7 @@ export default function FrameSequenceCanvas({
 
     const cleanupTasks: Array<() => void> = [];
     const context = gsap.context(() => {
-      roomTimelineRefs.current = rooms.map((_, index) => {
-        const card = roomCardRefs.current[index];
-        if (!card) return null;
-        return gsap.timeline({ paused: true })
-          .fromTo(
-            card,
-            { autoAlpha: 0, y: 22, filter: "blur(9px)" },
-            { autoAlpha: 1, y: 0, filter: "blur(0px)", duration: 0.22, ease: "power3.out" },
-          )
-          .to({}, { duration: 0.52 })
-          .to(card, { autoAlpha: 0, y: -14, filter: "blur(7px)", duration: 0.26, ease: "power2.in" });
-      });
-
-      const observer = new ResizeObserver(() => {
+      const resizeCanvas = () => {
         const rect = canvas.getBoundingClientRect();
         const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
         const width = Math.round(rect.width * pixelRatio);
@@ -173,30 +353,26 @@ export default function FrameSequenceCanvas({
           renderedFrameRef.current = -1;
           drawFrame(currentFrameRef.current);
         }
-      });
+      };
+
+      const observer = new ResizeObserver(resizeCanvas);
       observer.observe(canvas);
+      window.addEventListener("resize", resizeCanvas);
+      resizeCanvas();
 
       const trigger = ScrollTrigger.create({
         id: "villa-scroll-sequence",
         trigger: section,
         start: "top top",
-        end: () => `+=${window.innerHeight * 5}`,
+        end: () => `+=${window.innerHeight * (reducedMotion ? 1 : 5)}`,
         pin: true,
         scrub: true,
         anticipatePin: 1,
         invalidateOnRefresh: true,
-        onEnter: () => {
-          setSequenceActive(true);
-        },
-        onEnterBack: () => {
-          setSequenceActive(true);
-        },
-        onLeave: () => {
-          setSequenceActive(false);
-        },
-        onLeaveBack: () => {
-          setSequenceActive(false);
-        },
+        onEnter: () => setSequenceActive(true),
+        onEnterBack: () => setSequenceActive(true),
+        onLeave: () => setSequenceActive(false),
+        onLeaveBack: () => setSequenceActive(false),
         onUpdate: (self) => scheduleScrollRender(self.progress),
         onRefresh: (self) => scheduleScrollRender(self.progress),
       });
@@ -204,8 +380,7 @@ export default function FrameSequenceCanvas({
       ScrollTrigger.refresh();
       scheduleScrollRender(trigger.progress);
 
-      const media = window.matchMedia("(pointer: fine) and (prefers-reduced-motion: no-preference)");
-      if (media.matches) {
+      if (!reducedMotion && window.matchMedia("(pointer: fine)").matches) {
         const moveCard = (event: PointerEvent) => {
           const rect = section.getBoundingClientRect();
           const x = (event.clientX - rect.left) / rect.width - 0.5;
@@ -227,6 +402,7 @@ export default function FrameSequenceCanvas({
 
       cleanupTasks.push(() => {
         observer.disconnect();
+        window.removeEventListener("resize", resizeCanvas);
         trigger.kill();
         triggerRef.current = null;
       });
@@ -238,154 +414,7 @@ export default function FrameSequenceCanvas({
       context.revert();
       cleanupTasks.forEach((cleanup) => cleanup());
     };
-  }, [drawFrame, lenis, scheduleScrollRender]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let nextIndex = 0;
-    const pendingFrames = pendingFramesRef.current;
-    framesRef.current.length = totalFrames;
-    backgroundProgressRef.current = 0;
-
-    const loadFrame = (index: number, priority: "high" | "low") => {
-      if (framesRef.current[index]) return Promise.resolve();
-      const pending = pendingFrames.get(index);
-      if (pending) return pending;
-
-      const request = new Promise<void>((resolve, reject) => {
-        const image = new window.Image();
-        image.decoding = "async";
-        image.fetchPriority = priority;
-        image.onload = () => {
-          if (cancelled) {
-            resolve();
-            return;
-          }
-          framesRef.current[index] = image;
-          if (currentFrameRef.current === index) {
-            renderedFrameRef.current = -1;
-            drawFrame(index);
-          }
-          resolve();
-        };
-        image.onerror = () => reject(new Error(`Could not load ${framePath(index)}`));
-        image.src = framePath(index);
-      }).finally(() => {
-        if (pendingFrames.get(index) === request) {
-          pendingFrames.delete(index);
-        }
-      });
-      pendingFrames.set(index, request);
-      return request;
-    };
-
-    let demandLoading = false;
-    let queuedDemand: number | null = null;
-    const processDemandQueue = async () => {
-      if (demandLoading) return;
-      demandLoading = true;
-      while (!cancelled && queuedDemand !== null) {
-        const index = queuedDemand;
-        queuedDemand = null;
-        if (framesRef.current[index]) continue;
-        try {
-          await loadFrame(index, "high");
-        } catch {
-          if (!cancelled) {
-            setBackgroundFailures((failures) =>
-              failures.includes(index) ? failures : [...failures, index].sort((a, b) => a - b),
-            );
-          }
-        }
-      }
-      demandLoading = false;
-    };
-    const requestFrame = (index: number) => {
-      queuedDemand = index;
-      void processDemandQueue();
-    };
-    requestFrameRef.current = requestFrame;
-
-    const loadRange = async (
-      start: number,
-      end: number,
-      concurrency: number,
-      priority: "high" | "low",
-      onSettled: (succeeded: boolean) => void,
-    ) => {
-      nextIndex = start;
-      const failures: number[] = [];
-
-      const worker = async () => {
-        while (!cancelled) {
-          const index = nextIndex;
-          nextIndex += 1;
-          if (index >= end) return;
-          let succeeded = false;
-          try {
-            await loadFrame(index, priority);
-            succeeded = true;
-          } catch {
-            failures.push(index);
-          } finally {
-            if (!cancelled) onSettled(succeeded);
-          }
-        }
-      };
-
-      await Promise.all(
-        Array.from({ length: Math.min(concurrency, end - start) }, () => worker()),
-      );
-      return failures;
-    };
-
-    const loadSequence = async () => {
-      const failures = await loadRange(
-        0,
-        initialFrames,
-        INITIAL_CONCURRENCY,
-        "high",
-        (succeeded) => {
-          setSettledInitial((count) => count + 1);
-          if (succeeded) setLoadedInitial((count) => count + 1);
-        },
-      );
-      if (cancelled) return;
-      if (failures.length) {
-        setInitialFailures(failures.sort((a, b) => a - b));
-        return;
-      }
-
-      setIsReady(true);
-      if (initialFrames >= totalFrames) return;
-      const backgroundErrors = await loadRange(
-        initialFrames,
-        totalFrames,
-        BACKGROUND_CONCURRENCY,
-        "low",
-        () => {
-          backgroundProgressRef.current += 1;
-          if (
-            backgroundProgressRef.current % BACKGROUND_CONCURRENCY === 0 ||
-            backgroundProgressRef.current === totalFrames - initialFrames
-          ) {
-            setBackgroundProgress(backgroundProgressRef.current);
-          }
-        },
-      );
-      if (!cancelled) setBackgroundFailures(backgroundErrors.sort((a, b) => a - b));
-    };
-
-    void loadSequence();
-    return () => {
-      cancelled = true;
-      queuedDemand = null;
-      pendingFrames.clear();
-      if (requestFrameRef.current === requestFrame) {
-        requestFrameRef.current = () => {};
-      }
-    };
-  }, [drawFrame, initialFrames, retry, totalFrames]);
+  }, [drawFrame, lenis, reducedMotion, scheduleScrollRender]);
 
   useEffect(() => {
     const cursor = document.querySelector<HTMLElement>(".villa-cursor");
@@ -395,6 +424,7 @@ export default function FrameSequenceCanvas({
       !experience ||
       !window.matchMedia("(pointer: fine) and (prefers-reduced-motion: no-preference)").matches
     ) return;
+
     const setX = gsap.quickTo(cursor, "x", { duration: 0.35, ease: "power3.out" });
     const setY = gsap.quickTo(cursor, "y", { duration: 0.35, ease: "power3.out" });
     const moveCursor = (event: PointerEvent) => {
@@ -416,23 +446,18 @@ export default function FrameSequenceCanvas({
     };
   }, []);
 
-  const scrollToRoom = (index: number) => {
+  const scrollToScene = (index: number) => {
     const trigger = triggerRef.current;
     if (!trigger || !lenis) return;
-    const room = rooms[index];
-    const progress = room.start + (room.end - room.start) * 0.42;
+    const scene = scenes[index];
+    const progress =
+      ((scene.startSeconds + scene.endSeconds) / 2) / sourceDurationSeconds;
     const destination = trigger.start + (trigger.end - trigger.start) * progress;
     lenis.scrollTo(destination, {
-      duration: 1.2,
+      duration: reducedMotion ? 0 : 1.2,
       easing: (value) => 1 - Math.pow(1 - value, 4),
     });
   };
-
-  const loadingPercent = Math.floor((settledInitial / initialFrames) * 100);
-  const backgroundCount = totalFrames - initialFrames;
-  const backgroundPercent = backgroundCount
-    ? Math.floor((backgroundProgress / backgroundCount) * 100)
-    : 100;
 
   return (
     <div className="villa-experience">
@@ -440,92 +465,83 @@ export default function FrameSequenceCanvas({
         ref={sectionRef}
         id="villa-sequence"
         className="villa-sequence"
+        style={{
+          backgroundImage: `url(/${frameManifest.frameDirectory}/${frameManifest.frames[0].filename})`,
+        }}
         aria-label="Scroll-controlled villa walkthrough"
       >
-        <canvas ref={canvasRef} className="villa-canvas" aria-label="Villa image sequence controlled by scrolling" role="img" />
+        <canvas
+          ref={canvasRef}
+          className="villa-canvas"
+          aria-label={`Villa image sequence, ${totalFrames} frames`}
+          role="img"
+        />
         <div className="villa-vignette" aria-hidden="true" />
         <div className="villa-grain" aria-hidden="true" />
+
         {!isReady && (
           <div className="sequence-loader" role="status" aria-live="polite">
-            {initialFailures.length ? (
-              <>
-                <p>Some frames could not be loaded.</p>
-                <button
-                  type="button"
-                  onClick={() => {
-                    framesRef.current = Array.from({ length: totalFrames }, () => null);
-                    currentFrameRef.current = 0;
-                    renderedFrameRef.current = -1;
-                    setLoadedInitial(0);
-                    setSettledInitial(0);
-                    setInitialFailures([]);
-                    setBackgroundProgress(0);
-                    setBackgroundFailures([]);
-                    setIsReady(false);
-                    setRetry((value) => value + 1);
-                  }}
-                >
-                  Retry sequence
-                </button>
-              </>
-            ) : (
-              <>
-                <span className="sequence-loader-label">Preparing the villa</span>
-                <strong>{String(loadingPercent).padStart(2, "0")}<small>%</small></strong>
-                <span className="sequence-loader-track"><i style={{ width: `${loadingPercent}%` }} /></span>
-                <span className="sr-only">{loadedInitial} of {initialFrames} frames loaded; {settledInitial} checked.</span>
-              </>
+            <span className="sequence-loader-label">Preparing the villa</span>
+            <strong>{totalFrames}<small> frames</small></strong>
+            <p>{unavailableFrameCount > 0 ? "Some images are unavailable; the tour will continue." : "Loading the opening view…"}</p>
+            {unavailableFrameCount > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsReady(false);
+                  setUnavailableFrameCount(0);
+                  setRetry((value) => value + 1);
+                }}
+              >
+                Retry opening frames
+              </button>
             )}
           </div>
         )}
 
-        {rooms.map((room, index) => (
+        {scenes.map((scene, index) => (
           <div
-            key={room.name}
-            ref={(element) => { roomCardRefs.current[index] = element; }}
-            className={`room-overlay room-overlay-${room.placement}`}
-            aria-hidden={activeRoom !== index}
+            key={scene.name}
+            className={`room-overlay room-overlay-${scene.placement}${activeScene === index ? " is-active" : ""}`}
+            aria-hidden={activeScene !== index}
           >
             <div ref={(element) => { roomInnerRefs.current[index] = element; }} className="room-card">
-              <span className="room-card-index">0{index + 1} / 06</span>
-              <span className="room-card-name">{room.name}</span>
-              <h2>{room.title}</h2>
-              <p>{room.description}</p>
+              <span className="room-card-index">
+                {String(index + 1).padStart(2, "0")} / {String(scenes.length).padStart(2, "0")}
+              </span>
+              <span className="room-card-name">{scene.name}</span>
+              <h2>{scene.name}</h2>
+              <p>{scene.description}</p>
             </div>
           </div>
         ))}
 
         {sequenceActive && (
-          <nav className="room-progress" aria-label="Villa room navigation">
-            {rooms.map((room, index) => (
+          <nav className="room-progress" aria-label="Villa scene navigation">
+            {scenes.map((scene, index) => (
               <button
-                key={room.name}
+                key={scene.name}
                 ref={(element) => { progressButtonRefs.current[index] = element; }}
-                className={`room-progress-item${activeRoom === index ? " is-current" : ""}`}
+                className={`room-progress-item${activeScene === index ? " is-current" : ""}`}
                 type="button"
-                aria-label={`Scroll to ${room.name}`}
-                aria-current={activeRoom === index ? "step" : "false"}
-                onClick={() => scrollToRoom(index)}
+                aria-label={`Scroll to ${scene.name}`}
+                aria-current={activeScene === index ? "step" : "false"}
+                onClick={() => scrollToScene(index)}
               >
                 <span className="room-progress-line" aria-hidden="true" />
-                <span>{room.name}</span>
+                <span>{scene.name}</span>
               </button>
             ))}
           </nav>
         )}
 
-        {isReady && backgroundCount > 0 && backgroundProgress < backgroundCount && (
+        {unavailableFrameCount > 0 && isReady && (
           <p className="sequence-cache-status" role="status" aria-live="polite">
-            Caching remaining frames · {backgroundPercent}%
+            {unavailableFrameCount} frame{unavailableFrameCount === 1 ? "" : "s"} unavailable; the sequence remains available.
           </p>
         )}
-        {backgroundFailures.length > 0 && (
-          <p className="sequence-cache-status" role="status">
-            {backgroundFailures.length} background frames unavailable
-          </p>
-        )}
-        </section>
-        <div className="villa-cursor" aria-hidden="true" />
+      </section>
+      <div className="villa-cursor" aria-hidden="true" />
     </div>
   );
 }

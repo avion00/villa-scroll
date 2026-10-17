@@ -8,7 +8,7 @@ import { properties } from "./lib/properties";
 export default function Home() {
   return (
     <>
-      <FrameSequenceCanvas frameCount={720} initialFrameCount={150} />
+      <FrameSequenceCanvas />
 
       <section className="section">
         <div className="page-container">
